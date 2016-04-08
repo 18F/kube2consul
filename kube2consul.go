@@ -45,7 +45,7 @@ import (
 var (
 	argConsulAgent   = flag.String("consul-agent", "http://127.0.0.1:8500", "URL to consul agent")
 	argKubecfgFile   = flag.String("kubecfg_file", "", "Location of kubecfg file for access to kubernetes service")
-	argKubeMasterUrl = flag.String("kube_master_url", "https://${KUBERNETES_SERVICE_HOST}:${KUBERNETES_SERVICE_PORT}", "Url to reach kubernetes master. Env variables in this flag will be expanded.")
+	argKubeMasterURL = flag.String("kube_master_url", "https://${KUBERNETES_SERVICE_HOST}:${KUBERNETES_SERVICE_PORT}", "Url to reach kubernetes master. Env variables in this flag will be expanded.")
 	argDryRun        = flag.Bool("dryrun", false, "Runs without connecting to consul")
 	argChecks        = flag.Bool("checks", false, "Adds TCP service checks for each TCP Service")
 	argConsulSync    = flag.Int("consul-sync", 0, "Set >0 to run a consul sync loop. Useful for consul restarts")
@@ -62,6 +62,7 @@ const (
 	resyncPeriod = 5 * time.Second
 )
 
+//Contains checks if the requested string is in the slice
 func Contains(s []string, e string) bool {
 	for _, i := range s {
 		if i == e {
@@ -71,21 +72,21 @@ func Contains(s []string, e string) bool {
 	return false
 }
 
-func getKubeMasterUrl() (string, error) {
-	if *argKubeMasterUrl == "" {
+func getKubeMasterURL() (string, error) {
+	if *argKubeMasterURL == "" {
 		return "", fmt.Errorf("no --kube_master_url specified")
 	}
 
-	parsedUrl, err := url.Parse(os.ExpandEnv(*argKubeMasterUrl))
+	parsedURL, err := url.Parse(os.ExpandEnv(*argKubeMasterURL))
 	if err != nil {
-		return "", fmt.Errorf("failed to parse --kube_master_url %s - %v", *argKubeMasterUrl, err)
+		return "", fmt.Errorf("failed to parse --kube_master_url %s - %v", *argKubeMasterURL, err)
 	}
-	if parsedUrl.Scheme == "" || parsedUrl.Host == "" || parsedUrl.Host == ":" {
-		return "", fmt.Errorf("invalid --kube_master_url specified %s", *argKubeMasterUrl)
+	if parsedURL.Scheme == "" || parsedURL.Host == "" || parsedURL.Host == ":" {
+		return "", fmt.Errorf("invalid --kube_master_url specified %s", *argKubeMasterURL)
 	}
 
-	glog.Info("Parsed Master URL:", parsedUrl.String())
-	return parsedUrl.String(), nil
+	glog.Info("Parsed Master URL:", parsedURL.String())
+	return parsedURL.String(), nil
 }
 
 func createConsulClient(consulAgent string) (*consulapi.Client, error) {
@@ -95,18 +96,18 @@ func createConsulClient(consulAgent string) (*consulapi.Client, error) {
 	)
 
 	consulConfig := consulapi.DefaultConfig()
-	consulAgentUrl, err := url.Parse(consulAgent)
+	consulAgentURL, err := url.Parse(consulAgent)
 	if err != nil {
 		glog.Infof("Error parsing Consul url")
 		return nil, err
 	}
 
-	if consulAgentUrl.Host != "" {
-		consulConfig.Address = consulAgentUrl.Host
+	if consulAgentURL.Host != "" {
+		consulConfig.Address = consulAgentURL.Host
 	}
 
-	if consulAgentUrl.Scheme != "" {
-		consulConfig.Scheme = consulAgentUrl.Scheme
+	if consulAgentURL.Scheme != "" {
+		consulConfig.Scheme = consulAgentURL.Scheme
 	}
 
 	client, err = consulapi.NewClient(consulConfig)
@@ -137,18 +138,18 @@ func createConsulClient(consulAgent string) (*consulapi.Client, error) {
 }
 
 func createKubeClient() (*kclient.Client, error) {
-	masterUrl, err := getKubeMasterUrl()
+	masterURL, err := getKubeMasterURL()
 	if err != nil {
 		return nil, err
 	}
 
 	overrides := &kclientcmd.ConfigOverrides{}
-	overrides.ClusterInfo.Server = masterUrl
+	overrides.ClusterInfo.Server = masterURL
 
 	rules := kclientcmd.NewDefaultClientConfigLoadingRules()
 	kubeConfig, err := kclientcmd.NewNonInteractiveDeferredLoadingClientConfig(rules, overrides).ClientConfig()
 
-	kubeConfig.Host = masterUrl
+	kubeConfig.Host = masterURL
 	if err != nil {
 		glog.Error("Error creating Kube Config", err)
 		return nil, err
@@ -284,7 +285,7 @@ func main() {
 	//Attempt to create Consul Client (All ways needed so that channels are not blocked)
 	var consulClient *consulapi.Client
 	if *argDryRun == false {
-		consulClient, err = createConsulClient(*argConsulAgent)
+		consulClient, _ = createConsulClient(*argConsulAgent)
 	}
 
 	//Do System Setup stuff (create channels?)

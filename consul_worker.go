@@ -10,12 +10,14 @@ import (
 	kapi "k8s.io/kubernetes/pkg/api"
 )
 
+//ConsulWorker Interface for interacting with a Consul object
 type ConsulWorker interface {
 	AddDNS(baseID string, service *kapi.Service)
 	RemoveDNS(baseID string)
 	SyncDNS()
 }
 
+//ConsulAgentWorker ConsulWorker with a connection to a Consul agent
 type ConsulAgentWorker struct {
 	ConsulWorker
 
@@ -23,7 +25,7 @@ type ConsulAgentWorker struct {
 	agent *consulapi.Client
 }
 
-func IsServiceNameValid(name string) bool {
+func isServiceNameValid(name string) bool {
 	if strings.Contains(name, ".") == false {
 		return true
 	}
@@ -32,15 +34,14 @@ func IsServiceNameValid(name string) bool {
 	return false
 }
 
-func IsServiceValid(service *kapi.Service) bool {
-	if IsServiceNameValid(service.Name) {
+func isServiceValid(service *kapi.Service) bool {
+	if isServiceNameValid(service.Name) {
 		if kapi.IsServiceIPSet(service) {
 			if service.Spec.Type == kapi.ServiceTypeNodePort {
 				return true // Service is valid
-			} else {
-				//Currently this is only for NodePorts.
-				glog.V(3).Infof("Skipping non-NodePort service: %s\n", service.Name)
 			}
+			//Currently this is only for NodePorts.
+			glog.V(3).Infof("Skipping non-NodePort service: %s\n", service.Name)
 		} else {
 			// if ClusterIP is not set, do not create a DNS records
 			glog.Infof("Skipping dns record for headless service: %s\n", service.Name)
@@ -50,7 +51,7 @@ func IsServiceValid(service *kapi.Service) bool {
 	return false
 }
 
-func CreateAgentServiceCheck(config DnsInfo, port *kapi.ServicePort) *consulapi.AgentServiceCheck {
+func createAgentServiceCheck(config DNSInfo, port *kapi.ServicePort) *consulapi.AgentServiceCheck {
 	glog.V(3).Info("Creating service check for: ", config.IPAddress, " on Port: ", port.NodePort)
 	return &consulapi.AgentServiceCheck{
 		TCP:      config.IPAddress + ":" + strconv.Itoa(port.NodePort),
@@ -58,7 +59,7 @@ func CreateAgentServiceCheck(config DnsInfo, port *kapi.ServicePort) *consulapi.
 	}
 }
 
-func CreateAgentServiceReg(config DnsInfo, name string, service *kapi.Service, port *kapi.ServicePort) *consulapi.AgentServiceRegistration {
+func createAgentServiceReg(config DNSInfo, name string, service *kapi.Service, port *kapi.ServicePort) *consulapi.AgentServiceRegistration {
 	labels := []string{"Kube", string(port.Protocol)}
 	asrID := config.BaseID + port.Name
 
@@ -79,6 +80,7 @@ func CreateAgentServiceReg(config DnsInfo, name string, service *kapi.Service, p
 	}
 }
 
+//NewConsulAgentWorker Creates a new ConsulAgentWorker connected to a client
 func NewConsulAgentWorker(client *consulapi.Client) *ConsulAgentWorker {
 	return &ConsulAgentWorker{
 		agent: client,
@@ -86,7 +88,8 @@ func NewConsulAgentWorker(client *consulapi.Client) *ConsulAgentWorker {
 	}
 }
 
-func (client *ConsulAgentWorker) AddDNS(config DnsInfo, service *kapi.Service) {
+//AddDNS Adds the DNS information to consul
+func (client *ConsulAgentWorker) AddDNS(config DNSInfo, service *kapi.Service) {
 	glog.V(3).Info("Starting Add DNS for: ", config.BaseID)
 
 	if config.IPAddress == "" || config.BaseID == "" {
@@ -94,7 +97,7 @@ func (client *ConsulAgentWorker) AddDNS(config DnsInfo, service *kapi.Service) {
 	}
 
 	//Validate Service
-	if !IsServiceValid(service) {
+	if !isServiceValid(service) {
 		return
 	}
 	//Check Port Count & Determine DNS Entry Name
@@ -107,11 +110,11 @@ func (client *ConsulAgentWorker) AddDNS(config DnsInfo, service *kapi.Service) {
 	}
 
 	for _, port := range service.Spec.Ports {
-		asr := CreateAgentServiceReg(config, serviceName, service, &port)
+		asr := createAgentServiceReg(config, serviceName, service, &port)
 
 		if *argChecks && port.Protocol == "TCP" {
 			//Create Check if neeeded
-			asr.Check = CreateAgentServiceCheck(config, &port)
+			asr.Check = createAgentServiceCheck(config, &port)
 		}
 
 		if client.agent != nil {
@@ -128,7 +131,8 @@ func (client *ConsulAgentWorker) AddDNS(config DnsInfo, service *kapi.Service) {
 	//Exit
 }
 
-func (client *ConsulAgentWorker) RemoveDNS(config DnsInfo) {
+//RemoveDNS Removes the DNS information requested from Consul
+func (client *ConsulAgentWorker) RemoveDNS(config DNSInfo) {
 	if ids, ok := client.ids[config.BaseID]; ok {
 		for _, asr := range ids {
 			if client.agent != nil {
@@ -143,7 +147,7 @@ func (client *ConsulAgentWorker) RemoveDNS(config DnsInfo) {
 	}
 }
 
-func ContainsServiceId(id string, services map[string]*consulapi.AgentService) bool {
+func containsServiceID(id string, services map[string]*consulapi.AgentService) bool {
 	for _, service := range services {
 		if service.ID == id {
 			return true
@@ -153,12 +157,13 @@ func ContainsServiceId(id string, services map[string]*consulapi.AgentService) b
 	return false
 }
 
+//SyncDNS Verifies that all requested services are actually registered
 func (client *ConsulAgentWorker) SyncDNS() {
 	if client.agent != nil {
 		if services, err := client.agent.Agent().Services(); err == nil {
 			for _, registered := range client.ids {
 				for _, service := range registered {
-					if !ContainsServiceId(service.ID, services) {
+					if !containsServiceID(service.ID, services) {
 						glog.Info("Regregistering missing service ID: ", service.ID)
 						client.agent.Agent().ServiceRegister(service)
 					}
@@ -170,6 +175,7 @@ func (client *ConsulAgentWorker) SyncDNS() {
 	}
 }
 
+//RunConsulWorker Runs the ConsulWorker while the queue is open
 func RunConsulWorker(queue <-chan ConsulWork, client *consulapi.Client) {
 	worker := NewConsulAgentWorker(client)
 
