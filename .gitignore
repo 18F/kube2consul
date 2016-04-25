@@ -25,3 +25,5 @@ _testmain.go
 
 src
 kube2consul
+consul
+vendor

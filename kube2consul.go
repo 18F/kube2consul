@@ -43,14 +43,15 @@ import (
 )
 
 var (
-	argConsulAgent   = flag.String("consul-agent", "http://127.0.0.1:8500", "URL to consul agent")
-	argKubecfgFile   = flag.String("kubecfg_file", "", "Location of kubecfg file for access to kubernetes service")
-	argKubeMasterURL = flag.String("kube_master_url", "https://${KUBERNETES_SERVICE_HOST}:${KUBERNETES_SERVICE_PORT}", "Url to reach kubernetes master. Env variables in this flag will be expanded.")
-	argDryRun        = flag.Bool("dryrun", false, "Runs without connecting to consul")
-	argChecks        = flag.Bool("checks", false, "Adds TCP service checks for each TCP Service")
-	argConsulSync    = flag.Int("consul-sync", 0, "Set >0 to run a consul sync loop. Useful for consul restarts")
-	argKubeSync      = flag.Int("kube-sync", 0, "Set >0 to run a kube sync loop. Useful for kube sanity checks if a notifcation is missed")
-	argNodeSelector  = flag.String("node-selector", "", "Node label selector to use for proxies. Leave blank for all")
+	argConsulAgent       = flag.String("consul-agent", "http://127.0.0.1:8500", "URL to consul agent")
+	argKubecfgFile       = flag.String("kubecfg_file", "", "Location of kubecfg file for access to kubernetes service")
+	argKubeMasterURL     = flag.String("kube_master_url", "https://${KUBERNETES_SERVICE_HOST}:${KUBERNETES_SERVICE_PORT}", "Url to reach kubernetes master. Env variables in this flag will be expanded.")
+	argDryRun            = flag.Bool("dryrun", false, "Runs without connecting to consul")
+	argChecks            = flag.Bool("checks", false, "Adds TCP service checks for each TCP Service")
+	argConsulSync        = flag.Int("consul-sync", 0, "Set >0 to run a consul sync loop. Useful for consul restarts")
+	argKubeSync          = flag.Int("kube-sync", 0, "Set >0 to run a kube sync loop. Useful for kube sanity checks if a notifcation is missed")
+	argNodeSelector      = flag.String("node-selector", "", "Node label selector to use for proxies. Leave blank for all")
+	argTCPDomainRedirect = flag.String("tcpDomainRedirect", "", "Specifies a domain to register all services as in order to act as a redirect")
 
 	nodeSelector = labels.Everything()
 )
@@ -295,8 +296,12 @@ func main() {
 	//Launch KubeLoops
 	watchForNodes(kubeClient, kubeWorkQueue)
 	watchForServices(kubeClient, kubeWorkQueue)
+
+	cConfig := ConsulWorkerConfig{
+		TCPDomain: *argTCPDomainRedirect,
+	}
 	//Launch Consul Loops
-	go RunConsulWorker(consulWorkQueue, consulClient)
+	go RunConsulWorker(consulWorkQueue, consulClient, cConfig)
 
 	//Launch Sync Loops (if needed)
 	if *argConsulSync > 0 {

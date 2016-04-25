@@ -1,8 +1,13 @@
 package main // import "github.com/jmccarty3/kube2consul"
 
 import (
+	"errors"
+	"fmt"
+	"os"
+	"os/signal"
 	"strconv"
 	"strings"
+	"syscall"
 
 	"github.com/golang/glog"
 
@@ -10,19 +15,31 @@ import (
 	kapi "k8s.io/kubernetes/pkg/api"
 )
 
+//ConsulWorkerConfig is a configuration object for the consul worker
+type ConsulWorkerConfig struct {
+	TCPDomain string
+}
+
 //ConsulWorker Interface for interacting with a Consul object
 type ConsulWorker interface {
-	AddDNS(baseID string, service *kapi.Service)
-	RemoveDNS(baseID string)
+	AddDNS(config DNSInfo, service *kapi.Service) error
+	RemoveDNS(config DNSInfo) error
 	SyncDNS()
+	PurgeDNS()
 }
 
 //ConsulAgentWorker ConsulWorker with a connection to a Consul agent
 type ConsulAgentWorker struct {
-	ConsulWorker
-
 	ids   map[string][]*consulapi.AgentServiceRegistration
 	agent *consulapi.Client
+}
+
+//ConsulCatalogWorker operates on consuls catalog rather then a direct agent
+type ConsulCatalogWorker struct {
+	domain   string
+	agent    *consulapi.Client
+	ids      map[string][]string //Keeps track of which services a "BaseID" is associated with
+	services map[string]int      //Keeps track of how many "nodes" are attempting to use the service.
 }
 
 func isServiceNameValid(name string) bool {
@@ -59,16 +76,24 @@ func createAgentServiceCheck(config DNSInfo, port *kapi.ServicePort) *consulapi.
 	}
 }
 
+func createServiceNameFromPort(serviceName string, port *kapi.ServicePort) string {
+	var name string
+
+	if len(port.Name) > 0 {
+		name = serviceName + "-" + port.Name
+	} else {
+		name = serviceName + "-" + strconv.Itoa(port.Port)
+	}
+
+	return name
+}
+
 func createAgentServiceReg(config DNSInfo, name string, service *kapi.Service, port *kapi.ServicePort) *consulapi.AgentServiceRegistration {
 	labels := []string{"Kube", string(port.Protocol)}
 	asrID := config.BaseID + port.Name
 
 	if name == "" {
-		if len(port.Name) > 0 {
-			name = service.Name + "-" + port.Name
-		} else {
-			name = service.Name + "-" + strconv.Itoa(port.Port)
-		}
+		name = createServiceNameFromPort(service.Name, port)
 	}
 
 	return &consulapi.AgentServiceRegistration{
@@ -80,6 +105,24 @@ func createAgentServiceReg(config DNSInfo, name string, service *kapi.Service, p
 	}
 }
 
+func createAgentService(name string, service *kapi.Service, port *kapi.ServicePort) *consulapi.AgentService {
+	labels := []string{"Kube", string(port.Protocol)}
+
+	if name == "" {
+		name = createServiceNameFromPort(service.Name, port)
+	}
+
+	return &consulapi.AgentService{
+		Service: name,
+		Tags:    labels,
+	}
+}
+
+/*
+func createCatalogRegistration(name string, service *kapi.Service, port *kapi.ServicePort) *consulapi.CatalogRegistration {
+}
+*/
+
 //NewConsulAgentWorker Creates a new ConsulAgentWorker connected to a client
 func NewConsulAgentWorker(client *consulapi.Client) *ConsulAgentWorker {
 	return &ConsulAgentWorker{
@@ -89,16 +132,18 @@ func NewConsulAgentWorker(client *consulapi.Client) *ConsulAgentWorker {
 }
 
 //AddDNS Adds the DNS information to consul
-func (client *ConsulAgentWorker) AddDNS(config DNSInfo, service *kapi.Service) {
+func (client *ConsulAgentWorker) AddDNS(config DNSInfo, service *kapi.Service) error {
 	glog.V(3).Info("Starting Add DNS for: ", config.BaseID)
 
 	if config.IPAddress == "" || config.BaseID == "" {
 		glog.Error("DNS Info is not valid for AddDNS")
+
+		return errors.New("DNS Info invalid")
 	}
 
 	//Validate Service
 	if !isServiceValid(service) {
-		return
+		return errors.New("Service Not Valid")
 	}
 	//Check Port Count & Determine DNS Entry Name
 	var serviceName string
@@ -108,6 +153,8 @@ func (client *ConsulAgentWorker) AddDNS(config DNSInfo, service *kapi.Service) {
 	} else {
 		serviceName = ""
 	}
+
+	var failed []string
 
 	for _, port := range service.Spec.Ports {
 		asr := createAgentServiceReg(config, serviceName, service, &port)
@@ -121,6 +168,8 @@ func (client *ConsulAgentWorker) AddDNS(config DNSInfo, service *kapi.Service) {
 			//Registers with DNS
 			if err := client.agent.Agent().ServiceRegister(asr); err != nil {
 				glog.Error("Error creating service record: ", asr.ID)
+				failed = append(failed, asr.ID)
+				continue
 			}
 		}
 
@@ -128,11 +177,15 @@ func (client *ConsulAgentWorker) AddDNS(config DNSInfo, service *kapi.Service) {
 		client.ids[config.BaseID] = append(client.ids[config.BaseID], asr)
 	}
 
+	if len(failed) != 0 {
+		return fmt.Errorf("Error creating service: %s", failed)
+	}
 	//Exit
+	return nil
 }
 
 //RemoveDNS Removes the DNS information requested from Consul
-func (client *ConsulAgentWorker) RemoveDNS(config DNSInfo) {
+func (client *ConsulAgentWorker) RemoveDNS(config DNSInfo) error {
 	if ids, ok := client.ids[config.BaseID]; ok {
 		for _, asr := range ids {
 			if client.agent != nil {
@@ -145,6 +198,8 @@ func (client *ConsulAgentWorker) RemoveDNS(config DNSInfo) {
 	} else {
 		glog.Error("Requested to remove non-existant BaseID DNS of:", config.BaseID)
 	}
+
+	return nil
 }
 
 func containsServiceID(id string, services map[string]*consulapi.AgentService) bool {
@@ -175,9 +230,133 @@ func (client *ConsulAgentWorker) SyncDNS() {
 	}
 }
 
+//PurgeDNS Removes all currently registered entries from consul
+func (client *ConsulAgentWorker) PurgeDNS() {
+	for id := range client.ids {
+		dns := DNSInfo{
+			BaseID: id,
+		}
+
+		client.RemoveDNS(dns)
+	}
+}
+
+//NewConsulCatalogWorker creates a worker to act on consuls catalog
+func NewConsulCatalogWorker(client *consulapi.Client, config *ConsulWorkerConfig) *ConsulCatalogWorker {
+	return &ConsulCatalogWorker{
+		agent:    client,
+		domain:   config.TCPDomain,
+		ids:      make(map[string][]string),
+		services: make(map[string]int),
+	}
+}
+
+//AddDNS Adds the service to consuls catalog
+func (client *ConsulCatalogWorker) AddDNS(config DNSInfo, service *kapi.Service) error {
+	//Validate Service
+	if !isServiceValid(service) {
+		return fmt.Errorf("Service %s is not vaild", service.Name)
+	}
+
+	//Check Port Count & Determine DNS Entry Name
+	var serviceName string
+
+	if len(service.Spec.Ports) == 1 {
+		serviceName = service.Name
+	} else {
+		serviceName = ""
+	}
+
+	if client.services[service.Name] == 0 { //Only register if the service is new to us
+		for _, port := range service.Spec.Ports {
+			s := createAgentService(serviceName, service, &port)
+			cr := &consulapi.CatalogRegistration{
+				Node:    fmt.Sprintf("%s-kube2consul", s.Service),
+				Address: fmt.Sprintf("%s.%s", s.Service, client.domain),
+				Service: s,
+			}
+
+			if client.agent != nil {
+				_, err := client.agent.Catalog().Register(cr, nil)
+				if err != nil {
+					return err
+				}
+			}
+		}
+	}
+
+	client.ids[config.BaseID] = append(client.ids[config.BaseID], service.Name)
+	client.services[service.Name] = client.services[service.Name] + 1
+
+	return nil
+}
+
+//RemoveDNS Removes the dns information from consul
+func (client *ConsulCatalogWorker) RemoveDNS(config DNSInfo) error {
+	if services, exists := client.ids[config.BaseID]; exists {
+		for s := range services { //TODO This logic needs to be split up. Way too much scope
+			if count, ok := client.services[services[s]]; ok {
+				count--
+
+				if count <= 0 {
+					if client.agent != nil {
+						cdr := &consulapi.CatalogDeregistration{
+							Node: fmt.Sprintf("%s-kube2consul", services[s]),
+						}
+
+						client.agent.Catalog().Deregister(cdr, nil)
+					}
+					delete(client.services, services[s])
+				} else {
+					client.services[services[s]] = count
+				}
+			}
+		}
+		delete(client.ids, config.BaseID)
+	} else {
+		glog.Warning("Attempted to remove unregistered service:", config.BaseID)
+	}
+	return nil
+}
+
+//SyncDNS Does nothing on the catalog
+func (*ConsulCatalogWorker) SyncDNS() {
+	//Nothing to sync
+}
+
+//PurgeDNS removes all currently registered items from consul
+func (client *ConsulCatalogWorker) PurgeDNS() {
+	for id := range client.ids {
+		dns := DNSInfo{
+			BaseID: id,
+		}
+
+		client.RemoveDNS(dns)
+	}
+}
+
+func cleanup(c <-chan os.Signal, worker ConsulWorker) {
+	<-c
+	glog.Info("Trapped termination signal. Purging DNS")
+	worker.PurgeDNS()
+	glog.Info("DNS Purged. Exiting")
+	os.Exit(0)
+}
+
 //RunConsulWorker Runs the ConsulWorker while the queue is open
-func RunConsulWorker(queue <-chan ConsulWork, client *consulapi.Client) {
-	worker := NewConsulAgentWorker(client)
+func RunConsulWorker(queue <-chan ConsulWork, client *consulapi.Client, config ConsulWorkerConfig) {
+	var worker ConsulWorker
+
+	if config.TCPDomain == "" {
+		worker = NewConsulAgentWorker(client)
+	} else {
+		worker = NewConsulCatalogWorker(client, &config)
+	}
+
+	sigs := make(chan os.Signal, 1)
+	signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM)
+
+	go cleanup(sigs, worker)
 
 	for work := range queue {
 		glog.V(4).Info("Consol Work Action: ", work.Action, " BaseID:", work.Config.BaseID)
