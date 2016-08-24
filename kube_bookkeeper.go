@@ -5,7 +5,6 @@ import (
 	//"k8s.io/kubernetes/pkg/api"
 	kapi "k8s.io/kubernetes/pkg/api"
 	kclient "k8s.io/kubernetes/pkg/client/unversioned"
-	kfields "k8s.io/kubernetes/pkg/fields"
 	klabels "k8s.io/kubernetes/pkg/labels"
 )
 
@@ -188,7 +187,8 @@ func ContainsNodeName(name string, nodes *kapi.NodeList) bool {
 //Sync Performs a full syncroniztion of Nodes.
 func (client *ClientBookKeeper) Sync() {
 	nodes := client.client.Nodes()
-	if nodeList, err := nodes.List(klabels.Everything(), kfields.Everything()); err == nil {
+	opts := kapi.ListOptions{LabelSelector: klabels.Everything()}
+	if nodeList, err := nodes.List(opts); err == nil {
 		for name := range client.nodes {
 			if !ContainsNodeName(name, nodeList) {
 				glog.Errorf("Bookkeeper has node: %s that does not exist in api server", name)

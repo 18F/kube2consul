@@ -71,7 +71,7 @@ func isServiceValid(service *kapi.Service) bool {
 func createAgentServiceCheck(config DNSInfo, port *kapi.ServicePort) *consulapi.AgentServiceCheck {
 	glog.V(3).Info("Creating service check for: ", config.IPAddress, " on Port: ", port.NodePort)
 	return &consulapi.AgentServiceCheck{
-		TCP:      config.IPAddress + ":" + strconv.Itoa(port.NodePort),
+		TCP:      config.IPAddress + ":" + strconv.Itoa(int(port.NodePort)),
 		Interval: "60s",
 	}
 }
@@ -82,7 +82,7 @@ func createServiceNameFromPort(serviceName string, port *kapi.ServicePort) strin
 	if len(port.Name) > 0 {
 		name = serviceName + "-" + port.Name
 	} else {
-		name = serviceName + "-" + strconv.Itoa(port.Port)
+		name = serviceName + "-" + strconv.Itoa(int(port.Port))
 	}
 
 	return name
@@ -100,7 +100,7 @@ func createAgentServiceReg(config DNSInfo, name string, service *kapi.Service, p
 		ID:      asrID,
 		Name:    name,
 		Address: config.IPAddress,
-		Port:    port.NodePort,
+		Port:    int(port.NodePort),
 		Tags:    labels,
 	}
 }
