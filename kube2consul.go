@@ -39,7 +39,7 @@ import (
 	kframework "k8s.io/kubernetes/pkg/controller/framework"
 	kSelector "k8s.io/kubernetes/pkg/fields"
 	"k8s.io/kubernetes/pkg/labels"
-	"k8s.io/kubernetes/pkg/util"
+	"k8s.io/kubernetes/pkg/util/wait"
 )
 
 var (
@@ -156,7 +156,6 @@ func createKubeClient() (*kclient.Client, error) {
 		return nil, err
 	}
 	glog.Infof("Using %s for kubernetes master", kubeConfig.Host)
-	glog.Infof("Using kubernetes API %s", kubeConfig.Version)
 	return kclient.New(kubeConfig)
 }
 
@@ -237,7 +236,7 @@ func watchForNodes(kubeClient *kclient.Client, queue chan<- KubeWork) {
 			},
 		},
 	)
-	go nodeController.Run(util.NeverStop)
+	go nodeController.Run(wait.NeverStop)
 }
 
 //TODO Combine with watchForNodes
@@ -260,7 +259,7 @@ func watchForServices(kubeClient *kclient.Client, queue chan<- KubeWork) {
 			},
 		},
 	)
-	go nodeController.Run(util.NeverStop)
+	go nodeController.Run(wait.NeverStop)
 }
 
 func main() {
